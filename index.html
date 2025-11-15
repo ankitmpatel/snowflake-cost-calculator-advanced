@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Advanced Snowflake Cost Calculator — Full (with per-service formulas)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{
+    --bg:#fafbfd; --card:#fff; --accent:#2563eb; --muted:#6b7280; --danger:#ef4444;
+  }
+  body{font-family:Inter,Arial,Helvetica,sans-serif;background:var(--bg);margin:18px;color:#0b1220;}
+  .container{max-width:1200px;margin:0 auto;}
+  h1{font-size:20px;margin:0 0 12px 0;}
+  .card{background:var(--card);border-radius:10px;padding:14px;box-shadow:0 8px 24px rgba(11,22,40,0.06);margin-bottom:14px;}
+  label{display:block;font-weight:600;margin-top:8px;font-size:13px;}
+  input[type="number"], input[type="text"], select{width:100%;padding:8px 10px;border-radius:8px;border:1px solid #dbe6f7;margin-top:6px;box-sizing:border-box;}
+  .grid{display:grid;gap:12px;}
+  .grid-2{grid-template-columns:repeat(2,1fr);}
+  .grid-3{grid-template-columns:repeat(3,1fr);}
+  .muted{color:var(--muted);font-size:13px;}
+  button{background:var(--accent);color:#fff;border:none;padding:9px 12px;border-radius:8px;cursor:pointer;font-weight:700;}
+  button.secondary{background:#e9f5ff;color:var(--accent);border:1px solid #d7e9ff;}
+  table{width:100%;border-collapse:collapse;margin-top:10px;}
+  th, td{padding:8px;border-bottom:1px solid #eef3fb;font-size:13px;text-align:left;}
+  .right{text-align:right;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,"Courier New",monospace;}
+  .formula{font-size:12px;color:#666;margin-top:8px;border-left:3px solid #eef2ff;padding-left:10px;background:#fbfdff;border-radius:6px;padding:8px;}
+  .small{font-size:12px;color:#666;}
+  pre{background:#0b1220;color:#e6eefc;padding:12px;border-radius:8px;overflow:auto;margin-top:8px;}
+  @media(max-width:920px){ .grid-2, .grid-3{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Advanced Snowflake Cost Calculator — Full</h1>
+
+  <div class="card">
+    <div style="display:flex;gap:12px;align-items:center;">
+      <div style="flex:1">
+        <label>Days in month</label>
+        <input type="number" id="daysInMonth" value="30" min="1" />
+      </div>
+      <div style="width:220px">
+        <label>Credit price ($ / credit)</label>
+        <select id="creditPrice">
+          <option value="2">Standard — $2 / credit</option>
+          <option value="3" selected>Enterprise — $3 / credit</option>
+          <option value="4">Business Critical — $4 / credit</option>
+        </select>
+      </div>
+      <div style="width:220px">
+        <label>Storage rate ($ / TB / month)</label>
+        <input type="number" id="storageRate" value="23" step="0.01" />
+      </div>
+      <div style="width:130px">
+        <label style="visibility:hidden">_</label>
+        <button class="secondary" onclick="resetAll()">Reset</button>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:8px;">
+      This model includes compute, storage (db + time-travel + failsafe + long-term), Snowpipe (serverless), Snowpipe Streaming,
+      materialized views, search optimization, automatic clustering (approx), query acceleration, dynamic tables, serverless tasks, data transfer,
+      replication, reader accounts, marketplace, external functions, Snowpark container (approx).
+    </div>
+  </div>
+
+  <!-- Warehouses (Compute) -->
+  <div id="computeCard" class="card">
+    <h3>Compute — Warehouses & Concurrency</h3>
+    <div class="muted">Add warehouses; specify credits/hr and hours/day or load% — concurrency scaling adds additional credits (%)</div>
+
+    <table id="whTable">
+      <thead><tr><th>Warehouse</th><th>Credits/hr</th><th>Hours/day</th><th>Load %</th><th>Concurrency %</th><th>Active</th><th>Action</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+      <button onclick="addWarehouse('Small',2,8,0,0,true)">+ Add Small</button>
+      <button onclick="addWarehouse('Medium',4,8,0,10,true)">+ Add Medium</button>
+      <button onclick="addWarehouse('Large',8,6,0,20,true)">+ Add Large</button>
+      <button class="secondary" onclick="addDefaultWH()">Add S / M / L</button>
+      <div style="margin-left:auto" class="muted">Tip: Use Hours/day for fixed billing or Load% to split query load.</div>
+    </div>
+
+    <div id="computeFormula" class="formula" style="display:none;"></div>
+  </div>
+
+  <!-- Storage -->
+  <div id="storageCard" class="card grid grid-2">
+    <div>
+      <h3>Storage</h3>
+      <label>Database Storage (TB)</label>
+      <input type="number" id="dbStorageTB" value="5" step="0.01" />
+      <label>Time-Travel Reserved (days)</label>
+      <input type="number" id="timeTravelDays" value="1" min="0" step="1" />
+      <label>Fail-safe Storage (TB)</label>
+      <input type="number" id="failsafeTB" value="0.5" step="0.01" />
+      <label>Long-term retention extra (TB)</label>
+      <input type="number" id="longTermTB" value="0" step="0.01" />
+    </div>
+
+    <div>
+      <h3>Storage Assumptions & Rates</h3>
+      <label>Time-Travel factor (% of base storage per day)</label>
+      <input type="number" id="ttFactorPerDay" value="0.02" step="0.0001" />
+      <label>Failsafe factor (explicit TB or use input field)</label>
+      <div class="muted">Fail-safe usually ~ 7 days of data retention billed by Snowflake separately; we allow explicit TB above.</div>
+      <label>Storage rate ($ / TB / month)</label>
+      <input type="number" id="storageRateOverride" placeholder="leave blank to use main rate" />
+    </div>
+
+    <div id="storageFormula" class="formula" style="display:none;"></div>
+  </div>
+
+  <!-- Snowpipe & Streaming -->
+  <div id="ingestCard" class="card grid grid-2">
+    <div>
+      <h3>Snowpipe (serverless)</h3>
+      <label>Files per day (ingest)</label>
+      <input type="number" id="pipeFilesPerDay" value="1000" step="1" />
+      <label>Credits per 1000 files (factor)</label>
+      <input type="number" id="pipeCreditsPer1k" value="0.06" step="0.0001" />
+      <div id="pipeFormula" class="formula" style="display:none;"></div>
+    </div>
+
+    <div>
+      <h3>Snowpipe Streaming</h3>
+      <label>Rows per day</label>
+      <input type="number" id="streamRowsPerDay" value="1000000" step="1" />
+      <label>Credits per 10k rows</label>
+      <input type="number" id="streamCreditsPer10k" value="0.000007" step="0.0000001" />
+      <div id="streamFormula" class="formula" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Materialized Views, Search, Dynamic Tables -->
+  <div id="advancedCard" class="card grid grid-3">
+    <div>
+      <h3>Materialized Views</h3>
+      <label>Estimated MV refresh hours / month</label>
+      <input type="number" id="mvHoursMonthly" value="10" step="0.1" />
+      <label>Assumed credits/hr for MV refresh</label>
+      <input type="number" id="mvCreditsPerHour" value="4" step="0.01" />
+      <div id="mvFormula" class="formula" style="display:none;"></div>
+    </div>
+
+    <div>
+      <h3>Search Optimization</h3>
+      <label>Indexed data (TB)</label>
+      <input type="number" id="searchOptTB" value="0.5" step="0.01" />
+      <label>Credits per TB / month (approx)</label>
+      <input type="number" id="searchCreditsPerTB" value="0.1" step="0.001" />
+      <div id="searchFormula" class="formula" style="display:none;"></div>
+    </div>
+
+    <div>
+      <h3>Dynamic Tables</h3>
+      <label>Processing hours / month (total)</label>
+      <input type="number" id="dynamicHoursMonthly" value="5" step="0.1" />
+      <label>Assumed credits / hour</label>
+      <input type="number" id="dynamicCreditsPerHour" value="4" step="0.01" />
+      <div id="dynamicFormula" class="formula" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Serverless, Automatic Clustering, QAS -->
+  <div id="serverlessCard" class="card grid grid-3">
+    <div>
+      <h3>Serverless Tasks / Procedures</h3>
+      <label>Serverless minutes / month</label>
+      <input type="number" id="serverlessMinutes" value="300" step="1" />
+      <label>Credits per minute (assumption)</label>
+      <input type="number" id="serverlessCreditsPerMin" value="0.002" step="0.0001" />
+      <div id="serverlessFormula" class="formula" style="display:none;"></div>
+    </div>
+
+    <div>
+      <h3>Automatic Clustering (approx)</h3>
+      <label>Estimated clustering credits / month</label>
+      <input type="number" id="clusteringCreditsMonthly" value="10" step="0.1" />
+      <div id="clusteringFormula" class="formula" style="display:none;"></div>
+    </div>
+
+    <div>
+      <h3>Query Acceleration Service (QAS)</h3>
+      <label>Estimated QAS credits / month</label>
+      <input type="number" id="qasCreditsMonthly" value="5" step="0.1" />
+      <div id="qasFormula" class="formula" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Data transfer & replication -->
+  <div id="transferCard" class="card grid grid-2">
+    <div>
+      <h3>Data Transfer</h3>
+      <label>External egress (TB / month)</label>
+      <input type="number" id="egressTB" value="0.5" step="0.01" />
+      <label>Cross-region transfer TB / month</label>
+      <input type="number" id="crossRegionTB" value="1" step="0.01" />
+      <label>Cross-cloud transfer TB / month</label>
+      <input type="number" id="crossCloudTB" value="0" step="0.01" />
+      <label>Egress rate ($/TB)</label>
+      <input type="number" id="egressRatePerTB" value="90" step="0.1" />
+      <label>Cross-region rate ($/TB)</label>
+      <input type="number" id="crossRegionRatePerTB" value="20" step="0.1" />
+      <label>Cross-cloud rate ($/TB)</label>
+      <input type="number" id="crossCloudRatePerTB" value="50" step="0.1" />
+      <div id="transferFormula" class="formula" style="display:none;"></div>
+    </div>
+
+    <div>
+      <h3>Replication & Reader Accounts</h3>
+      <label>Replicated DB size (TB)</label>
+      <input type="number" id="replicatedTB" value="1" step="0.01" />
+      <label>Replication freq (times / month)</label>
+      <input type="number" id="repFreq" value="30" step="1" />
+      <label>Reader accounts credits/month (approx)</label>
+      <input type="number" id="readerCredits" value="0" step="0.01" />
+      <div id="replicationFormula" class="formula" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Additional / Marketplace / External functions / Snowpark -->
+  <div id="otherCard" class="card grid grid-2">
+    <div>
+      <h3>Marketplace / External / Snowpark</h3>
+      <label>Marketplace monthly $</label>
+      <input type="number" id="marketplaceCost" value="0" step="0.01" />
+      <label>External functions monthly credits (approx)</label>
+      <input type="number" id="externalFuncCredits" value="0" step="0.01" />
+      <label>Snowpark container credits / month (approx)</label>
+      <input type="number" id="snowparkCredits" value="0" step="0.01" />
+      <div id="otherFormula" class="formula" style="display:none;"></div>
+    </div>
+
+    <div>
+      <h3>Misc & Notes</h3>
+      <label>Other monthly $ (support, services)</label>
+      <input type="number" id="miscCost" value="0" step="0.01" />
+      <div class="muted" style="margin-top:8px;">
+        Formulas are shown under each section. Many Snowflake charges depend on exact account behaviour; tune the per-service assumptions to match your billing.
+      </div>
+    </div>
+  </div>
+
+  <!-- Compute button -->
+  <div class="card" style="display:flex;gap:8px;align-items:center;">
+    <button onclick="performCalculation()">Calculate Monthly Cost</button>
+    <button class="secondary" onclick="downloadJSON()">Export JSON</button>
+    <button class="secondary" onclick="downloadCSV()">Export CSV</button>
+    <div style="margin-left:auto" class="muted">After calculating you'll see per-service formulas and a JSON report.</div>
+  </div>
+
+  <!-- Results -->
+  <div id="results" class="card" style="display:none;">
+    <h3>Monthly Cost Summary</h3>
+
+    <table>
+      <thead><tr><th>Service</th><th class="right">Monthly Cost ($)</th></tr></thead>
+      <tbody>
+        <tr><td>Compute (warehouses + concurrency)</td><td class="right" id="out_compute"></td></tr>
+        <tr><td>Storage (DB)</td><td class="right" id="out_storage"></td></tr>
+        <tr><td>Time-Travel & Fail-safe & Long-term</td><td class="right" id="out_storage_extra"></td></tr>
+        <tr><td>Snowpipe + Streaming</td><td class="right" id="out_pipe"></td></tr>
+        <tr><td>Materialized Views</td><td class="right" id="out_mv"></td></tr>
+        <tr><td>Search Optimization</td><td class="right" id="out_search"></td></tr>
+        <tr><td>Dynamic Tables</td><td class="right" id="out_dynamic"></td></tr>
+        <tr><td>Serverless Tasks</td><td class="right" id="out_serverless"></td></tr>
+        <tr><td>Clustering & QAS</td><td class="right" id="out_clustering"></td></tr>
+        <tr><td>Data Transfer</td><td class="right" id="out_transfer"></td></tr>
+        <tr><td>Replication</td><td class="right" id="out_replication"></td></tr>
+        <tr><td>Reader Accounts</td><td class="right" id="out_reader"></td></tr>
+        <tr><td>Marketplace / External / Snowpark</td><td class="right" id="out_other"></td></tr>
+        <tr><td>Misc</td><td class="right" id="out_misc"></td></tr>
+        <tr style="font-weight:800"><td>Grand Total (monthly)</td><td class="right" id="out_total"></td></tr>
+      </tbody>
+    </table>
+
+    <h4 style="margin-top:12px;">Per-warehouse breakdown</h4>
+    <table id="whSummary"><thead><tr><th>Warehouse</th><th class="right">Credits / month</th><th class="right">Cost ($/month)</th></tr></thead><tbody></tbody></table>
+
+    <h4 style="margin-top:12px">Detailed JSON</h4>
+    <pre id="jsonOut" class="mono">{ }</pre>
+  </div>
+
+</div>
+
+<script>
+/* ---------- Helpers ---------- */
+function $id(id){ return document.getElementById(id); }
+function num(v, d=0){ return Number(v===undefined||v===''?d:v); }
+function money(v){ return "$ " + Number(v||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); }
+
+/* ---------- Warehouse functions ---------- */
+function addWarehouse(name='WH', creditsPerHour=4, hoursPerDay=8, loadPercent=0, concurrencyPct=0, active=true){
+  const tbody = $id('whTable').querySelector('tbody');
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input type="text" class="wh-name" value="${name}" /></td>
+    <td><input type="number" class="wh-credits" value="${creditsPerHour}" step="0.01" /></td>
+    <td><input type="number" class="wh-hours" value="${hoursPerDay}" step="0.1" /></td>
+    <td><input type="number" class="wh-load" value="${loadPercent}" step="0.1" /></td>
+    <td><input type="number" class="wh-concurrency" value="${concurrencyPct}" step="0.1" /></td>
+    <td style="text-align:center"><input type="checkbox" class="wh-active" ${active ? 'checked' : ''} /></td>
+    <td><button style="background:#ef4444;color:#fff;border:none;padding:6px 8px;border-radius:6px;cursor:pointer;" onclick="this.closest('tr').remove()">Delete</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function addDefaultWH(){
+  addWarehouse('Small',2,8,30,0,true);
+  addWarehouse('Medium',4,8,50,10,true);
+  addWarehouse('Large',8,6,20,20,true);
+}
+
+/* ---------- Compute sub-calculation ---------- */
+function computeWarehouses(days, creditPrice){
+  const rows = Array.from($id('whTable').querySelectorAll('tbody tr'));
+  const whDetails = [];
+  let totalCredits = 0;
+  let totalCost = 0;
+
+  rows.forEach(r=>{
+    const name = r.querySelector('.wh-name').value || 'WH';
+    const creditsPerHour = num(r.querySelector('.wh-credits').value,0);
+    const hoursPerDay = num(r.querySelector('.wh-hours').value,0);
+    const loadPercent = num(r.querySelector('.wh-load').value,0);
+    const concurrencyPct = num(r.querySelector('.wh-concurrency').value,0);
+    const active = r.querySelector('.wh-active').checked;
+
+    const billedHoursMonthly = active ? (hoursPerDay * days) : 0;
+    const baseCredits = creditsPerHour * billedHoursMonthly;
+    const concurrencyCredits = baseCredits * (concurrencyPct/100);
+    const totalCreditsForWH = baseCredits + concurrencyCredits;
+    const cost = totalCreditsForWH * creditPrice;
+
+    whDetails.push({ name, creditsPerHour, hoursPerDay, loadPercent, concurrencyPct, active, billedHoursMonthly, baseCredits, concurrencyCredits, totalCreditsForWH, cost });
+
+    totalCredits += totalCreditsForWH;
+    totalCost += cost;
+  });
+
+  // compute formula text
+  let formula = `<b>Formula</b>: For each warehouse → credits = credits/hr × hours/day × days + concurrency% extra.<br>`;
+  formula += `<b>Total Credits (monthly)</b> = Σ(credits/hr × hours/day × days) + concurrency adjustments.<br>`;
+  formula += `Example values per warehouse shown in breakdown. <br><br>`;
+  formula += `<b>Computed totals</b>: Total Credits = ${totalCredits.toFixed(3)} credits; Cost = ${money(totalCost)} (using $${creditPrice}/credit).`;
+
+  return { whDetails, totalCredits, totalCost, formula };
+}
+
+/* ---------- Storage ---------- */
+function computeStorage(days, storageRateMain){
+  const dbTB = num($id('dbStorageTB').value,0);
+  const ttDays = num($id('timeTravelDays').value,0);
+  const ttFactorPerDay = num($id('ttFactorPerDay').value,0.02);
+  const failsafeTB = num($id('failsafeTB').value,0);
+  const longTermTB = num($id('longTermTB').value,0);
+  const storageRateOverride = $id('storageRateOverride').value;
+  const storageRate = storageRateOverride ? num(storageRateOverride) : storageRateMain;
+
+  // Time-Travel cost approx: ttFactorPerDay * dbTB * ttDays (TB) billed at same storage rate
+  const ttTB = dbTB * ttFactorPerDay * ttDays;
+  const dbCost = dbTB * storageRate;
+  const ttCost = ttTB * storageRate;
+  const failCost = failsafeTB * storageRate;
+  const longCost = longTermTB * storageRate;
+  const total = dbCost + ttCost + failCost + longCost;
+
+  const formula = `<b>Formulas</b>:
+  <br>Time-Travel additional TB ≈ dbTB × ttFactorPerDay × timeTravelDays = ${dbTB} × ${ttFactorPerDay} × ${ttDays} = ${ttTB.toFixed(3)} TB
+  <br>DB Cost = dbTB × rate = ${dbTB} × ${storageRate} = ${money(dbCost)}
+  <br>Time-Travel Cost = ${ttTB.toFixed(3)} × ${storageRate} = ${money(ttCost)}
+  <br>Fail-safe Cost = ${failsafeTB} × ${storageRate} = ${money(failCost)}
+  <br>Long-term Cost = ${longTermTB} × ${storageRate} = ${money(longCost)}
+  <br><b>Total Storage Cost</b> = ${money(total)}.`;
+
+  return { dbTB, ttTB, ttDays, storageRate, dbCost, ttCost, failCost, longCost, total, formula };
+}
+
+/* ---------- Snowpipe / Streaming ---------- */
+function computeSnowpipe(days, creditPrice){
+  const filesPerDay = num($id('pipeFilesPerDay').value,0);
+  const factor = num($id('pipeCreditsPer1k').value,0.06);
+  const filesMonthly = filesPerDay * days;
+  const credits = (filesMonthly / 1000) * factor;
+  const cost = credits * creditPrice;
+
+  const formula = `<b>Formulas</b>:
+  <br>Files/month = files/day × days = ${filesPerDay} × ${days} = ${filesMonthly}
+  <br>Snowpipe credits = (files/month / 1000) × factor = (${filesMonthly}/1000) × ${factor} = ${credits.toFixed(6)} credits
+  <br>Cost = ${credits.toFixed(6)} × $${creditPrice} = ${money(cost)}`;
+
+  return { filesPerDay, filesMonthly, credits, cost, formula };
+}
+
+function computeSnowpipeStreaming(days, creditPrice){
+  const rowsPerDay = num($id('streamRowsPerDay').value,0);
+  const factor = num($id('streamCreditsPer10k').value,0.000007);
+  const rowsMonthly = rowsPerDay * days;
+  const credits = (rowsMonthly / 10000) * factor;
+  const cost = credits * creditPrice;
+
+  const formula = `<b>Formulas</b>:
+  <br>Rows/month = ${rowsPerDay} × ${days} = ${rowsMonthly}
+  <br>Credits = (rows/month / 10,000) × ${factor} = ${credits.toFixed(8)} credits
+  <br>Cost = ${credits.toFixed(8)} × $${creditPrice} = ${money(cost)}`;
+
+  return { rowsPerDay, rowsMonthly, credits, cost, formula };
+}
+
+/* ---------- MV, Search, Dynamic ---------- */
+function computeMaterializedViews(creditPrice){
+  const hours = num($id('mvHoursMonthly').value,0);
+  const creditsPerHour = num($id('mvCreditsPerHour').value,4);
+  const credits = hours * creditsPerHour;
+  const cost = credits * creditPrice;
+
+  const formula = `<b>Formulas</b>:
+  <br>MV monthly credits = hours × credits/hr = ${hours} × ${creditsPerHour} = ${credits.toFixed(3)} credits
+  <br>Cost = ${credits.toFixed(3)} × $${creditPrice} = ${money(cost)}`;
+
+  return { hours, creditsPerHour, credits, cost, formula };
+}
+
+function computeSearchOptimization(creditPrice){
+  const tb = num($id('searchOptTB').value,0);
+  const creditsPerTB = num($id('searchCreditsPerTB').value,0.1);
+  const credits = tb * creditsPerTB;
+  const cost = credits * creditPrice;
+
+  const formula = `<b>Formulas</b>:
+  <br>Search Optimization credits = indexedTB × creditsPerTB = ${tb} × ${creditsPerTB} = ${credits.toFixed(3)} credits
+  <br>Cost = ${credits.toFixed(3)} × $${creditPrice} = ${money(cost)}`;
+
+  return { tb, creditsPerTB, credits, cost, formula };
+}
+
+function computeDynamicTables(creditPrice){
+  const hours = num($id('dynamicHoursMonthly').value,0);
+  const creditsPerHour = num($id('dynamicCreditsPerHour').value,4);
+  const credits = hours * creditsPerHour;
+  const cost = credits * creditPrice;
+
+  const formula = `<b>Formulas</b>:
+  <br>Dynamic Tables credits = hours × credits/hr = ${hours} × ${creditsPerHour} = ${credits.toFixed(3)} credits
+  <br>Cost = ${credits.toFixed(3)} × $${creditPrice} = ${money(cost)}`;
+
+  return { hours, creditsPerHour, credits, cost, formula };
+}
+
+/* ---------- Serverless, clustering, QAS ---------- */
+function computeServerless(creditPrice){
+  const minutes = num($id('serverlessMinutes').value,0);
+  const creditsPerMin = num($id('serverlessCreditsPerMin').value,0.002);
+  const credits = minutes * creditsPerMin;
+  const cost = credits * creditPrice;
+
+  const formula = `<b>Formulas</b>:
+  <br>Credits = minutes × credits/min = ${minutes} × ${creditsPerMin} = ${credits.toFixed(4)} credits
+  <br>Cost = ${credits.toFixed(4)} × $${creditPrice} = ${money(cost)}`;
+
+  return { minutes, creditsPerMin, credits, cost, formula };
+}
+
+function computeClusteringAndQAS(creditPrice){
+  const clusteringCredits = num($id('clusteringCreditsMonthly').value,0);
+  const qasCredits = num($id('qasCreditsMonthly').value,0);
+  const clusteringCost = clusteringCredits * creditPrice;
+  const qasCost = qasCredits * creditPrice;
+
+  const formula = `<b>Formulas</b>:
+  <br>Clustering credits = ${clusteringCredits} → Cost = ${money(clusteringCost)}
+  <br>QAS credits = ${qasCredits} → Cost = ${money(qasCost)}`;
+
+  return { clusteringCredits, qasCredits, clusteringCost, qasCost, formula };
+}
+
+/* ---------- Data transfer & replication ---------- */
+function computeDataTransfer(){
+  const egressTB = num($id('egressTB').value,0);
+  const crossRegionTB = num($id('crossRegionTB').value,0);
+  const crossCloudTB = num($id('crossCloudTB').value,0);
+  const egressRate = num($id('egressRatePerTB').value,90);
+  const crossRegionRate = num($id('crossRegionRatePerTB').value,20);
+  const crossCloudRate = num($id('crossCloudRatePerTB').value,50);
+
+  const cost = egressTB*egressRate + crossRegionTB*crossRegionRate + crossCloudTB*crossCloudRate;
+
+  const formula = `<b>Formulas</b>:
+  <br>Egress cost = ${egressTB} × ${egressRate} = ${money(egressTB*egressRate)}
+  <br>Cross-region cost = ${crossRegionTB} × ${crossRegionRate} = ${money(crossRegionTB*crossRegionRate)}
+  <br>Cross-cloud cost = ${crossCloudTB} × ${crossCloudRate} = ${money(crossCloudTB*crossCloudRate)}
+  <br><b>Total Transfer cost</b> = ${money(cost)}`;
+
+  return { egressTB, crossRegionTB, crossCloudTB, egressRate, crossRegionRate, crossCloudRate, cost, formula };
+}
+
+function computeReplication(storageRate, days, creditPrice){
+  const replicatedTB = num($id('replicatedTB').value,0);
+  const freq = num($id('repFreq').value,30);
+  const replicationStorageCost = replicatedTB * storageRate; // baseline monthly store for replica
+  // approximate incremental storage per replication frequency - simplified model
+  const freqStorageCost = replicatedTB * storageRate * (freq/30);
+  const computeCreditsForReplication = 0; // we leave compute for replication to warehouses if needed
+  const computeCost = computeCreditsForReplication * creditPrice;
+  const total = replicationStorageCost + freqStorageCost + computeCost;
+
+  const formula = `<b>Formulas</b>:
+  <br>Replicated DB storage = ${replicatedTB} TB × ${storageRate} = ${money(replicationStorageCost)}
+  <br>Incremental (freq) cost ~ ${replicatedTB} × ${storageRate} × (freq/30) = ${money(freqStorageCost)}
+  <br>Compute for replication (not modelled here) = ${money(computeCost)}
+  <br><b>Total replication cost</b> = ${money(total)}`;
+
+  return { replicatedTB, freq, replicationStorageCost, freqStorageCost, computeCreditsForReplication, computeCost, total, formula };
+}
+
+/* ---------- Reader and other ---------- */
+function computeReaderAccounts(creditPrice){
+  const readerCredits = num($id('readerCredits').value,0);
+  const cost = readerCredits * creditPrice;
+  const formula = `<b>Formulas</b>:
+  <br>Reader credits = ${readerCredits}
+  <br>Cost = ${readerCredits} × $${creditPrice} = ${money(cost)}`;
+  return { readerCredits, cost, formula };
+}
+
+function computeOther(creditPrice){
+  const marketplace = num($id('marketplaceCost').value,0);
+  const externalCredits = num($id('externalFuncCredits').value,0);
+  const snowparkCredits = num($id('snowparkCredits').value,0);
+  const extCost = externalCredits * creditPrice;
+  const spCost = snowparkCredits * creditPrice;
+  const total = marketplace + extCost + spCost;
+  const formula = `<b>Formulas</b>:
+  <br>Marketplace = ${money(marketplace)}
+  <br>External functions cost = ${externalCredits} × $${creditPrice} = ${money(extCost)}
+  <br>Snowpark cost = ${snowparkCredits} × $${creditPrice} = ${money(spCost)}
+  <br><b>Total other</b> = ${money(total)}`;
+  return { marketplace, externalCredits, snowparkCredits, extCost, spCost, total, formula };
+}
+
+/* ---------- Master calculation ---------- */
+function performCalculation(){
+  const days = num($id('daysInMonth').value,30);
+  const creditPrice = num($id('creditPrice').value,3);
+  const storageRateMain = num($id('storageRate').value,23);
+
+  // compute
+  const wh = computeWarehouses(days, creditPrice);
+  $id('computeFormula').style.display = 'block';
+  $id('computeFormula').innerHTML = wh.formula;
+
+  // storage
+  const storage = computeStorage(days, storageRateMain);
+  $id('storageFormula').style.display = 'block';
+  $id('storageFormula').innerHTML = storage.formula;
+
+  // snowpipe & streaming
+  const pipe = computeSnowpipe(days, creditPrice);
+  $id('pipeFormula').style.display = 'block';
+  $id('pipeFormula').innerHTML = pipe.formula;
+
+  const streaming = computeSnowpipeStreaming(days, creditPrice);
+  $id('streamFormula').style.display = 'block';
+  $id('streamFormula').innerHTML = streaming.formula;
+
+  // MV, Search, Dynamic
+  const mv = computeMaterializedViews(creditPrice);
+  $id('mvFormula').style.display = 'block';
+  $id('mvFormula').innerHTML = mv.formula;
+
+  const search = computeSearchOptimization(creditPrice);
+  $id('searchFormula').style.display = 'block';
+  $id('searchFormula').innerHTML = search.formula;
+
+  const dynamic = computeDynamicTables(creditPrice);
+  $id('dynamicFormula').style.display = 'block';
+  $id('dynamicFormula').innerHTML = dynamic.formula;
+
+  // serverless, clustering, qas
+  const serverless = computeServerless(creditPrice);
+  $id('serverlessFormula').style.display = 'block';
+  $id('serverlessFormula').innerHTML = serverless.formula;
+
+  const clusterQAS = computeClusteringAndQAS(creditPrice);
+  $id('clusteringFormula').style.display = 'block';
+  $id('clusteringFormula').innerHTML = clusterQAS.formula;
+  $id('qasFormula').style.display = 'block';
+  // qas formula included in clusterQAS.formula already.
+
+  // transfer & replication
+  const transfer = computeDataTransfer();
+  $id('transferFormula').style.display = 'block';
+  $id('transferFormula').innerHTML = transfer.formula;
+
+  const replication = computeReplication(storage.storageRate || storageRateMain, days, creditPrice);
+  $id('replicationFormula').style.display = 'block';
+  $id('replicationFormula').innerHTML = replication.formula;
+
+  // reader & other
+  const reader = computeReaderAccounts(creditPrice);
+  $id('replicationFormula').style.display = 'block';
+  $id('replicationFormula').innerHTML = replication.formula + '<br><br>' + reader.formula;
+
+  const other = computeOther(creditPrice);
+  $id('otherFormula').style.display = 'block';
+  $id('otherFormula').innerHTML = other.formula;
+
+  // totals
+  const computeCost = wh.totalCost;
+  const storageCost = storage.dbCost;
+  const storageExtra = storage.ttCost + storage.failCost + storage.longCost;
+  const pipeCost = pipe.cost + streaming.cost;
+  const mvCost = mv.cost;
+  const searchCost = search.cost;
+  const dynamicCost = dynamic.cost;
+  const serverlessCost = serverless.cost;
+  const clusteringCost = clusterQAS.clusteringCost;
+  const qasCost = clusterQAS.qasCost;
+  const clusteringTotal = clusteringCost + qasCost;
+  const transferCost = transfer.cost;
+  const replicationCost = replication.total;
+  const readerCost = reader.cost;
+  const otherCost = other.total;
+  const miscCost = num($id('miscCost').value,0);
+
+  const grandTotal = computeCost + storageCost + storageExtra + pipeCost + mvCost + searchCost + dynamicCost + serverlessCost + clusteringTotal + transferCost + replicationCost + readerCost + otherCost + miscCost;
+
+  // render summary
+  $id('out_compute').textContent = money(computeCost);
+  $id('out_storage').textContent = money(storageCost);
+  $id('out_storage_extra').textContent = money(storageExtra);
+  $id('out_pipe').textContent = money(pipeCost);
+  $id('out_mv').textContent = money(mvCost);
+  $id('out_search').textContent = money(searchCost);
+  $id('out_dynamic').textContent = money(dynamicCost);
+  $id('out_serverless').textContent = money(serverlessCost);
+  $id('out_clustering').textContent = money(clusteringTotal);
+  $id('out_transfer').textContent = money(transferCost);
+  $id('out_replication').textContent = money(replicationCost);
+  $id('out_reader').textContent = money(readerCost);
+  $id('out_other').textContent = money(otherCost);
+  $id('out_misc').textContent = money(miscCost);
+  $id('out_total').textContent = money(grandTotal);
+
+  // per-warehouse breakdown
+  const whBody = $id('whSummary').querySelector('tbody');
+  whBody.innerHTML = '';
+  wh.whDetails.forEach(w=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${w.name}</td><td class="right mono">${w.totalCreditsForWH.toFixed(3)}</td><td class="right mono">${money(w.cost)}</td>`;
+    whBody.appendChild(tr);
+  });
+
+  // JSON dump
+  const out = {
+    meta: { days, creditPrice, storageRateMain },
+    compute: wh,
+    storage, pipe, streaming, mv, search, dynamic, serverless, clusteringAndQAS: clusterQAS,
+    transfer, replication, reader, other, miscCost, totals: {
+      computeCost, storageCost, storageExtra, pipeCost, mvCost, searchCost, dynamicCost, serverlessCost, clusteringTotal, transferCost, replicationCost, readerCost, otherCost, miscCost, grandTotal
+    }
+  };
+  $id('jsonOut').textContent = JSON.stringify(out, null, 2);
+
+  $id('results').style.display = 'block';
+  window.lastCalc = out;
+}
+
+/* ---------- Export helpers ---------- */
+function downloadJSON(){
+  if(!window.lastCalc){ alert('Calculate first'); return; }
+  const data = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(window.lastCalc, null, 2));
+  const a = document.createElement('a'); a.href = data; a.download = 'snowflake_advanced_calc.json'; document.body.appendChild(a); a.click(); a.remove();
+}
+function downloadCSV(){
+  if(!window.lastCalc){ alert('Calculate first'); return; }
+  const o = window.lastCalc.totals;
+  const rows = [
+    ['Item','Monthly ($)'],
+    ['Compute', o.computeCost.toFixed(2)],
+    ['Storage', o.storageCost.toFixed(2)],
+    ['Storage Extra', o.storageExtra.toFixed(2)],
+    ['Snowpipe+Streaming', o.pipeCost.toFixed(2)],
+    ['Materialized Views', o.mvCost.toFixed(2)],
+    ['Search Optimization', o.searchCost.toFixed(2)],
+    ['Dynamic Tables', o.dynamicCost.toFixed(2)],
+    ['Serverless', o.serverlessCost.toFixed(2)],
+    ['Clustering & QAS', o.clusteringTotal.toFixed(2)],
+    ['Data Transfer', o.transferCost.toFixed(2)],
+    ['Replication', o.replicationCost.toFixed(2)],
+    ['Reader Accounts', o.readerCost.toFixed(2)],
+    ['Marketplace & Other', o.otherCost.toFixed(2)],
+    ['Misc', o.miscCost.toFixed(2)],
+    ['Grand Total', o.grandTotal.toFixed(2)]
+  ];
+  const csv = rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const data = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  const a = document.createElement('a'); a.href = data; a.download = 'snowflake_advanced_summary.csv'; document.body.appendChild(a); a.click(); a.remove();
+}
+
+/* ---------- Reset ---------- */
+function resetAll(){ if(confirm('Reset to defaults?')) location.reload(); }
+
+/* ---------- Init ---------- */
+(function init(){
+  addDefaultWH();
+})();
+</script>
+</body>
+</html>
